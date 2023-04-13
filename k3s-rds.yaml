@@ -1,0 +1,391 @@
+tosca_definitions_version: cloudify_dsl_1_4
+
+imports:
+  - https://cloudify.co/spec/cloudify/6.4.0/types.yaml
+  - plugin:cloudify-aws-plugin
+  - plugin:cloudify-fabric-plugin
+  - plugin:cloudify-utilities-plugin
+
+inputs:
+  region_name:
+    type: string
+    display_label: AWS Region Name
+    description: Select AWS region name
+    default: eu-west-1
+
+  ssh_key_secret_name:
+    description: Name of a Secret that stores SSH Key
+    type: string
+    hidden: true
+    default: ec2_ssh_key
+
+  instance_type:
+    description: Select instance size
+    type: string
+    display_label: Instance Type
+    default: t2.small
+
+  image_id:
+    description: >
+      The map between region and image id, it is used in EC2 instance
+      to select the right image id per selected region.
+    type: dict
+    default:
+      af-south-1: ami-063c69d7c74ab66f0
+      ap-east-1: ami-0bc36decfa5def7c7
+      ap-northeast-1: ami-05375ba8414409b07
+      ap-northeast-2: ami-0e735aba742568824
+      ap-northeast-3: ami-0ce70b86fc60c5c60
+      ap-south-1: ami-0caf778a172362f1c
+      ap-south-2: ami-0fedb94b7ea48bca3
+      ap-southeast-1: ami-05c8486d62efc5d07
+      ap-southeast-2: ami-0ec19a300f3097b5a
+      ap-southeast-3: ami-01855c90f88c94d7c
+      ap-southeast-4: ami-0b36f3dfd362aba7f
+      ca-central-1: ami-09e2c09f31b90da99
+      eu-central-1: ami-0e067cc8a2b58de59
+      eu-central-2: ami-0f8c5387947144f1b
+      eu-north-1: ami-0d32f1e246a0306ec
+      eu-south-1: ami-01fa20c124ed41944
+      eu-south-2: ami-086454e7cad135f9e
+      eu-west-1: ami-0cc4e06e6e710cd94
+      eu-west-2: ami-038d76c4d28805c09
+      eu-west-3: ami-0dfb6769e523bf035
+      me-central-1: ami-07a14c0633f4a923b
+      me-south-1: ami-0ae19262dabf63a7c
+      sa-east-1: ami-0970638a979a1415a
+      us-east-1: ami-09cd747c78a9add63
+      us-east-2: ami-0568936c8d2b91c4e
+      us-west-1: ami-0d221cb540e0015f4
+      us-west-2: ami-00712dae9a53f8c15
+    hidden: true
+
+  vm_default_username:
+    description: Default username for K3OS which is rancher.
+    type: string
+    default: ubuntu
+    hidden: true
+
+  aws_credentials:
+    description: The credentials for AWS
+    type: dict
+    default:
+      aws_access_key_id: { get_secret: aws_access_key_id }
+      aws_secret_access_key: { get_secret: aws_secret_access_key }
+      region_name: { get_input: region_name }
+    hidden: true
+
+node_templates:
+  vpc:
+    type: cloudify.nodes.aws.ec2.Vpc
+    properties:
+      client_config: { get_input: aws_credentials }
+      resource_config:
+        CidrBlock: 10.10.0.0/16
+
+  vm_ssh_key:
+    type: cloudify.keys.nodes.RSAKey
+    properties:
+      resource_config:
+        key_name: { get_input: ssh_key_secret_name }
+        openssh_format: true
+      use_secret_store: true
+      use_secrets_if_exist: true
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        create:
+          implementation: keys.cloudify_ssh_key.operations.create
+          inputs:
+            store_private_key_material: true
+
+  internet_gateway:
+    type: cloudify.nodes.aws.ec2.InternetGateway
+    properties:
+      client_config: { get_input: aws_credentials }
+    relationships:
+      - type: cloudify.relationships.connected_to
+        target: vpc
+
+  subnet:
+    type: cloudify.nodes.aws.ec2.Subnet
+    properties:
+      client_config: { get_input: aws_credentials }
+      resource_config:
+        CidrBlock: 10.10.0.0/24
+        AvailabilityZone: { concat: [{ get_input: region_name }, "a"] }
+    relationships:
+      - type: cloudify.relationships.depends_on
+        target: vpc
+
+  rds_subnet_1:
+    type: cloudify.nodes.aws.ec2.Subnet
+    properties:
+      client_config: { get_input: aws_credentials }
+      resource_config:
+        CidrBlock: 10.10.1.0/24
+        AvailabilityZone: { concat: [{ get_input: region_name }, "a"] }
+      Tags:
+        - Key: Name
+          Value: "subnet-rds-1"
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        poststart:
+          implementation: aws.cloudify_aws.ec2.resources.subnet.modify_subnet_attribute
+          inputs:
+            resource_config:
+              MapPublicIpOnLaunch:
+                Value: true
+    relationships:
+      - type: cloudify.relationships.depends_on
+        target: vpc
+
+  rds_subnet_2:
+    type: cloudify.nodes.aws.ec2.Subnet
+    properties:
+      client_config: { get_input: aws_credentials }
+      resource_config:
+        CidrBlock: 10.10.2.0/24
+        AvailabilityZone: { concat: [{ get_input: region_name }, "b"] }
+      Tags:
+        - Key: Name
+          Value: "subnet-rds-2"
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        poststart:
+          implementation: aws.cloudify_aws.ec2.resources.subnet.modify_subnet_attribute
+          inputs:
+            resource_config:
+              MapPublicIpOnLaunch:
+                Value: true
+    relationships:
+      - type: cloudify.relationships.depends_on
+        target: vpc
+
+  rds_subnet_group:
+    type: cloudify.nodes.aws.rds.SubnetGroup
+    properties:
+      client_config: { get_input: aws_credentials }
+      resource_config:
+        kwargs:
+          DBSubnetGroupName: exl-subnet-group
+          DBSubnetGroupDescription: Subnet Group for RDS MySQL
+          SubnetIds:
+            - { get_attribute: [rds_subnet_1, aws_resource_id] }
+            - { get_attribute: [rds_subnet_2, aws_resource_id] }
+          Tags:
+            - Key: Name
+              Value: "exl-subnet-group"
+    relationships:
+      - type: cloudify.relationships.depends_on
+        target: rds_subnet_1
+      - type: cloudify.relationships.depends_on
+        target: rds_subnet_2
+
+  routetable:
+    type: cloudify.nodes.aws.ec2.RouteTable
+    properties:
+      client_config: { get_input: aws_credentials }
+    relationships:
+      - type: cloudify.relationships.contained_in
+        target: vpc
+      - type: cloudify.relationships.connected_to
+        target: subnet
+
+  route_public_subnet_internet_gateway:
+    type: cloudify.nodes.aws.ec2.Route
+    properties:
+      resource_config:
+        kwargs:
+          DestinationCidrBlock: "0.0.0.0/0"
+      client_config: { get_input: aws_credentials }
+    relationships:
+      - type: cloudify.relationships.contained_in
+        target: routetable
+      - type: cloudify.relationships.connected_to
+        target: internet_gateway
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        stop: {}
+
+  security_group:
+    type: cloudify.nodes.aws.ec2.SecurityGroup
+    properties:
+      client_config: { get_input: aws_credentials }
+      resource_config:
+        GroupName: security_group_cloudify
+        Description: Created by Cloudify
+        VpcId: { get_attribute: [vpc, aws_resource_id] }
+    relationships:
+      - type: cloudify.relationships.depends_on
+        target: vpc
+
+  security_group_rules:
+    type: cloudify.nodes.aws.ec2.SecurityGroupRuleIngress
+    properties:
+      client_config: { get_input: aws_credentials }
+      resource_config:
+        IpPermissions:
+          - IpProtocol: icmp
+            FromPort: -1
+            ToPort: -1
+            IpRanges:
+              - CidrIp: 0.0.0.0/0
+          - IpProtocol: '-1'
+            FromPort: 0
+            ToPort: 65535
+            IpRanges:
+              - CidrIp: 0.0.0.0/0
+    relationships:
+      - type: cloudify.relationships.contained_in
+        target: security_group
+
+  rds_instance:
+    type: cloudify.nodes.aws.rds.Instance
+    properties:
+      resource_id: exlrds
+      client_config: { get_input: aws_credentials }
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        create:
+          inputs:
+            resource_config:
+              DBName: k3s
+              DBInstanceClass: db.t3.small
+              Engine: postgres
+              EngineVersion: "14.1"
+              Port: 5432
+              AvailabilityZone: { concat: [{ get_input: region_name }, "a"] }
+              StorageType: gp2
+              AllocatedStorage: 20
+              MasterUsername: k3s
+              MasterUserPassword: k3Sp4sSw0rD
+              DBSubnetGroupName: { get_attribute: [rds_subnet_group, resource_config, DBSubnetGroupName] }
+              VpcSecurityGroupIds:
+                - { get_attribute: [security_group, aws_resource_id] }
+    relationships:
+    - type: cloudify.relationships.depends_on
+      target: rds_subnet_group
+    - type: cloudify.relationships.aws.rds.instance.connected_to
+      target: security_group
+
+  nic:
+    type: cloudify.nodes.aws.ec2.Interface
+    properties:
+      client_config: { get_input: aws_credentials }
+      resource_config:
+        kwargs:
+          Description: Created by Cloudify
+          SubnetId: { get_attribute: [subnet, aws_resource_id] }
+          Groups: [{ get_attribute: [security_group, aws_resource_id] }]
+
+  ip:
+    type: cloudify.nodes.aws.ec2.ElasticIP
+    properties:
+      client_config: { get_input: aws_credentials }
+    relationships:
+      - type: cloudify.relationships.depends_on
+        target: nic
+
+  cloud_init:
+    type: cloudify.nodes.CloudInit.CloudConfig
+    properties:
+      resource_config:
+        users:
+          - name: { get_input: vm_default_username }
+            shell: /bin/bash
+            sudo: ['ALL=(ALL) NOPASSWD:ALL']
+            ssh-authorized-keys:
+              - { get_attribute: [vm_ssh_key, public_key_export] }
+    relationships:
+      - type: cloudify.relationships.depends_on
+        target: vm_ssh_key
+
+  vm:
+    type: cloudify.nodes.aws.ec2.Instances
+    properties:
+      client_config: { get_input: aws_credentials }
+      agent_config:
+        install_method: none
+        user: { get_input: vm_default_username }
+        key: { get_attribute: [vm_ssh_key, private_key_export] }
+      resource_config:
+        InstanceType: { get_input: instance_type }
+        ImageId: { get_input: [image_id, { get_input: region_name }] }
+        kwargs:
+          UserData: { get_attribute: [cloud_init, cloud_config] }
+          BlockDeviceMappings:
+            - DeviceName: '/dev/sda1'
+              Ebs:
+                VolumeSize: 20
+          TagSpecifications:
+            - ResourceType: instance
+              Tags:
+                - Key: Name
+                  Value: k3sdemo
+      use_public_ip: true
+      cloudify_tagging: false
+    relationships:
+      - type: cloudify.relationships.depends_on
+        target: cloud_init
+      - type: cloudify.relationships.depends_on
+        target: nic
+      - type: cloudify.relationships.depends_on
+        target: ip
+
+  install_k3s:
+    type: cloudify.nodes.Root
+    interfaces:
+      cloudify.interfaces.lifecycle:
+        start:
+          implementation: fabric.fabric_plugin.tasks.run_script
+          inputs:
+            script_path: k3s-rds-scripts/k3s_install.sh
+            fabric_env:
+              host_string: { get_attribute: [vm, public_ip_address] }
+              user: { get_input: vm_default_username }
+              key: { get_attribute: [vm_ssh_key, private_key_export] }
+            process:
+              env:
+                RDS_HOSTNAME: { get_attribute: [rds_instance, Endpoint, Address] }
+                RDS_PORT: { get_attribute: [rds_instance, Endpoint, Port] }
+    relationships:
+      - type: cloudify.relationships.depends_on
+        target: vm
+      - type: cloudify.relationships.depends_on
+        target: rds_instance
+
+labels:
+  obj-type:
+    values:
+      - aws
+
+capabilities:
+  vpc_id:
+    description: AWS Resource ID of the VPC
+    value: { get_attribute: [vpc, aws_resource_id] }
+
+  ssh_key_secret_name:
+    description: Name of the secret containing SSH key
+    value: { get_input: ssh_key_secret_name }
+
+  public_ip:
+    description: The public ip of the EC2 instance
+    value: { get_attribute: [vm, public_ip_address] }
+
+  private_key:
+    description: The private key for the EC2 instance
+    value: { get_attribute: [vm_ssh_key, private_key_export] }
+
+  public_key:
+    description: The private key for the EC2 instance
+    value: { get_attribute: [vm_ssh_key, public_key_export] }
+
+  rds_endpoint_address:
+    value: { get_attribute: [rds_instance, Endpoint, Address] }
+
+  rds_endpoint_port:
+    value: { get_attribute: [rds_instance, Endpoint, Port] }
+
+  kubeconfig:
+    description: Kubeconfig file of the newly created K3S cluster
+    value: { get_attribute: [install_k3s, kubeconfig] }

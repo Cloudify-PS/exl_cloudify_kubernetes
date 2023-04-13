@@ -1,0 +1,70 @@
+tosca_definitions_version: cloudify_dsl_1_4
+
+imports:
+  - https://cloudify.co/spec/cloudify/6.4.0/types.yaml
+
+inputs:
+  aks_kubernetes_endpoint:
+    type: string
+    default: { get_capability: [aks_azure, kubernetes_cluster_host] }
+
+  aks_kubernetes_token:
+    type: string
+    default: { get_capability: [aks_azure, token] }
+
+  eks_kubernetes_endpoint:
+    type: string
+    default: { get_capability: [eks_aws, kubernetes_cluster_host] }
+
+  eks_kubernetes_token:
+    type: string
+    default: { get_capability: [eks_aws, token] }
+
+node_templates:
+  aks_hello_world:
+    type: cloudify.nodes.ServiceComponent
+    properties:
+      resource_config:
+        blueprint:
+          external_resource: true
+          id: kubernetes_hello_world
+        deployment:
+          id: aks_hello_world
+          auto_inc_suffix: false
+          inputs:
+            kubernetes_endpoint: { get_input: aks_kubernetes_endpoint }
+            kubernetes_token: { get_input: aks_kubernetes_token }
+
+  eks_hello_world:
+    type: cloudify.nodes.ServiceComponent
+    properties:
+      resource_config:
+        blueprint:
+          external_resource: true
+          id: kubernetes_hello_world
+        deployment:
+          id: eks_hello_world
+          auto_inc_suffix: false
+          inputs:
+            kubernetes_endpoint: { get_input: eks_kubernetes_endpoint }
+            kubernetes_token: { get_input: eks_kubernetes_token }
+
+labels:
+  csys-obj-type:
+    values:
+      - environment
+
+outputs:
+  aks_hello_world_endpoint:
+    description: Service endpoint for AKS Cluster
+    value:
+      concat:
+        - "http://"
+        - { get_attribute: [aks_hello_world, capabilities, kubernetes_details, resources.yaml#1, status, load_balancer, ingress, 0, ip] }
+
+  eks_hello_world_endpoint:
+    description: Service endpoint for EKS Cluster
+    value:
+      concat:
+        - "http://"
+        - { get_attribute: [eks_hello_world, capabilities, kubernetes_details, resources.yaml#1, status, load_balancer, ingress, 0, hostname] }
