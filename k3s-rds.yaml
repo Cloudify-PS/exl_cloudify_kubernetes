@@ -348,6 +348,7 @@ node_templates:
               env:
                 RDS_HOSTNAME: { get_attribute: [rds_instance, Endpoint, Address] }
                 RDS_PORT: { get_attribute: [rds_instance, Endpoint, Port] }
+                PUBLIC_IP: { get_attribute: [vm, public_ip_address] }
     relationships:
       - type: cloudify.relationships.depends_on
         target: vm
